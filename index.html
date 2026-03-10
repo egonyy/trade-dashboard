@@ -232,23 +232,26 @@ async function fetchQuote(sym) {
   } catch(e){ return null; }
 }
 
-function getFromTo(range) {
-  const now = Math.floor(Date.now()/1000);
-  const map = {'1d':86400,'5d':432000,'1m':2592000,'3m':7776000,'1y':31536000};
-  return {to:now, from:now-(map[range]||86400)};
-}
-
 async function fetchCandles(sym, res, range) {
   try {
-    const {from,to} = getFromTo(range);
-    const r = await fetch(`${BASE}/stock/candle?symbol=${sym}&resolution=${res}&from=${from}&to=${to}&token=${API}`);
+    const now = Math.floor(Date.now()/1000);
+    const rangeSeconds = {'1d':86400,'5d':432000,'1m':2592000,'3m':7776000,'1y':31536000,'5y':157680000};
+    const seconds = rangeSeconds[range] || 31536000;
+    const from = now - seconds;
+    const url = `${BASE}/stock/candle?symbol=${sym}&resolution=${res}&from=${from}&to=${now}&token=${API}`;
+    console.log(`Fetching candles: ${sym} res=${res}`, url);
+    const r = await fetch(url);
     const d = await r.json();
-    if(!d||d.s==='no_data'||!d.t) return null;
+    console.log(`Candle response for ${sym}:`, d?.s, 'points:', d?.t?.length);
+    if(!d||d.s==='no_data'||!d.t||d.t.length===0) return null;
     return d.t.map((t,i)=>({
       t: new Date(t*1000),
       o: d.o[i], h: d.h[i], l: d.l[i], c: d.c[i], v: d.v[i]
     })).filter(c=>c.c!=null);
-  } catch(e){ return null; }
+  } catch(e){
+    console.error(`Candle fetch error for ${sym}:`, e);
+    return null;
+  }
 }
 
 // ── INDICATORS ─────────────────────────────────────────────────────────────
