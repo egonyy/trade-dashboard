@@ -174,7 +174,7 @@ const TT = {
 async function ttGetToken() {
   if(TT.accessToken && Date.now() < TT.tokenExpiry - 60000) return TT.accessToken;
   try {
-    const r = await fetch(\`\${TT.base}/oauth/token\`, {
+    const r = await fetch(`${TT.base}/oauth/token`, {
       method: 'POST',
       headers: {'Content-Type':'application/x-www-form-urlencoded'},
       body: new URLSearchParams({
@@ -200,10 +200,10 @@ async function ttGet(path) {
   const token = await ttGetToken();
   if(!token) return null;
   try {
-    const r = await fetch(\`\${TT.base}\${path}\`, {
+    const r = await fetch(`${TT.base}${path}`, {
       headers: {'Authorization': token, 'Content-Type':'application/json'}
     });
-    if(!r.ok) { console.error(\`TT \${path} → \${r.status}\`); return null; }
+    if(!r.ok) { console.error(`TT ${path} → ${r.status}`); return null; }
     return await r.json();
   } catch(e) { console.error('TT fetch error:', path, e); return null; }
 }
@@ -256,7 +256,7 @@ updateClock();
 // ── TASTYTRADE MARKET DATA ───────────────────────────────────────────────────
 async function fetchQuote(sym) {
   try {
-    const d = await ttGet(\`/market-data/quotes/\${sym}\`);
+    const d = await ttGet(`/market-data/quotes/${sym}`);
     const q = d?.data?.quotes?.[0] || d?.data;
     if(!q) return null;
     const price = parseFloat(q['last-price'] || q['close'] || q['bid'] || 0);
@@ -291,11 +291,11 @@ async function fetchCandles(sym, res, range) {
     const ms = rangeMs[range] || 31536000000;
     const from = new Date(now - ms).toISOString();
     const to   = now.toISOString();
-    const path = \`/market-data/history?symbol=\${sym}&interval=\${ttRes}&start=\${encodeURIComponent(from)}&end=\${encodeURIComponent(to)}\`;
-    console.log(\`Fetching candles: \${sym} \${ttRes}\`);
+    const path = `/market-data/history?symbol=${sym}&interval=${ttRes}&start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}`;
+    console.log(`Fetching candles: ${sym} ${ttRes}`);
     const d = await ttGet(path);
     const items = d?.data?.candles || d?.data?.items || d?.data || [];
-    if(!items||items.length===0){ console.log(\`No candles for \${sym}\`); return null; }
+    if(!items||items.length===0){ console.log(`No candles for ${sym}`); return null; }
     return items.map(c=>({
       t: new Date(c.time || c.datetime || c.t),
       o: parseFloat(c.open||c.o),
