@@ -160,8 +160,53 @@
 </div>
 
 <script>
-const POLY_KEY = 'XF7VIsABuROvCbskET6rqEiPv6TKZXHy';
-const POLY_BASE = 'https://api.polygon.io';
+// ── TASTYTRADE CONFIG ────────────────────────────────────────────────────────
+const TT = {
+  base:        'https://api.cert.tastyworks.com',
+  clientId:    '804b8f22-ecf3-4638-908f-f26536d5174e',
+  clientSecret:'d116c536fa31e3a2f27606457b8005940eb6ed42',
+  refreshToken:'eyJhbGciOiJFZERTQSIsInR5cCI6InJ0K2p3dCIsImtpZCI6Imlra1NGclFCRFNlZFBOX3lVTU4wZURlWUNGNEhNWTZsYTBtb3RBenVZUzAiLCJqa3UiOiJodHRwOi8vaW5ncmVzcy1uZ2lueC1leHRlcm5hbC1jb250cm9sbGVyLWV4dGVybmFsLmluZ3Jlc3Mtbmdpbnguc3ZjL29hdXRoL2p3a3MifQ.eyJpc3MiOiJodHRwczovL2FwaS5jZXJ0LnRhc3R5d29ya3MuY29tIiwic3ViIjoiVWQzM2ZiYWVmLTA1MTQtNDIxMC1hNTRjLWFhZTA5ZjUxZjliYyIsImlhdCI6MTc3MzE2NzMzOSwiYXVkIjoiODA0YjhmMjItZWNmMy00NjM4LTkwOGYtZjI2NTM2ZDUxNzRlIiwiZ3JhbnRfaWQiOiJHY2IwZGU3YTUtYWZlZi00NjI3LTk4ZWItMjBmNGUzNDk5MmZlIiwia2lkIjoiaWtrU0ZyUUJEU2VkUE5feVVNTjBlRGVZQ0Y0SE1ZNmxhMG1vdEF6dVlTMCIsInNjb3BlIjoicmVhZCB0cmFkZSBvcGVuaWQifQ.pXk0dqKPOpQn_scRBCAqwN4ZjlTUEBD5XvfxGR4TaEoiaEPpsYa-At8YSBuuAvd26WT8on_3odywWrmvxJyPDw',
+  account:     '5WY34946',
+  accessToken: null,
+  tokenExpiry:  0,
+};
+
+async function ttGetToken() {
+  if(TT.accessToken && Date.now() < TT.tokenExpiry - 60000) return TT.accessToken;
+  try {
+    const r = await fetch(\`\${TT.base}/oauth/token\`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({
+        grant_type:    'refresh_token',
+        refresh_token: TT.refreshToken,
+        client_id:     TT.clientId,
+        client_secret: TT.clientSecret,
+      })
+    });
+    const d = await r.json();
+    if(d.access_token) {
+      TT.accessToken = d.access_token;
+      TT.tokenExpiry = Date.now() + (d.expires_in||1800)*1000;
+      console.log('TT token refreshed OK');
+      return TT.accessToken;
+    }
+    console.error('TT token error:', d);
+    return null;
+  } catch(e) { console.error('TT auth error:', e); return null; }
+}
+
+async function ttGet(path) {
+  const token = await ttGetToken();
+  if(!token) return null;
+  try {
+    const r = await fetch(\`\${TT.base}\${path}\`, {
+      headers: {'Authorization': token, 'Content-Type':'application/json'}
+    });
+    if(!r.ok) { console.error(\`TT \${path} → \${r.status}\`); return null; }
+    return await r.json();
+  } catch(e) { console.error('TT fetch error:', path, e); return null; }
+}
 
 const TICKERS = {
   indexes: [
@@ -208,62 +253,57 @@ function updateClock() {
 setInterval(updateClock,1000);
 updateClock();
 
-// ── POLYGON/MASSIVE FETCH ──────────────────────────────────────────────────
+// ── TASTYTRADE MARKET DATA ───────────────────────────────────────────────────
 async function fetchQuote(sym) {
   try {
-    const r = await fetch(`${POLY_BASE}/v2/snapshot/locale/us/markets/stocks/tickers/${sym}?apiKey=${POLY_KEY}`);
-    const d = await r.json();
-    const t = d?.ticker;
-    if(!t) return null;
-    const price = t.day?.c || t.prevDay?.c;
-    const prev = t.prevDay?.c;
-    if(!price||!prev) return null;
+    const d = await ttGet(\`/market-data/quotes/\${sym}\`);
+    const q = d?.data?.quotes?.[0] || d?.data;
+    if(!q) return null;
+    const price = parseFloat(q['last-price'] || q['close'] || q['bid'] || 0);
+    const prev  = parseFloat(q['prev-close'] || q['previous-close'] || price);
+    if(!price) return null;
     const change = price - prev;
-    const changePct = (change/prev)*100;
+    const changePct = prev ? (change/prev)*100 : 0;
     return {
       sym,
       price: price.toFixed(2),
       change: change.toFixed(2),
       changePct: changePct.toFixed(2),
-      high: t.day?.h?.toFixed(2),
-      low: t.day?.l?.toFixed(2),
-      open: t.day?.o?.toFixed(2),
+      high: q['high'] ? parseFloat(q['high']).toFixed(2) : null,
+      low:  q['low']  ? parseFloat(q['low']).toFixed(2)  : null,
+      open: q['open'] ? parseFloat(q['open']).toFixed(2) : null,
       prevClose: prev.toFixed(2),
-      volume: t.day?.v,
+      volume: q['volume'] ? parseInt(q['volume']) : null,
       avgVolume: null
     };
-  } catch(e){ console.error('Quote error',sym,e); return null; }
+  } catch(e){ console.error('Quote error', sym, e); return null; }
 }
 
 async function fetchCandles(sym, res, range) {
   try {
-    // Map our resolution codes to Polygon multiplier/timespan
+    // TT candle resolution mapping
     const resMap = {
-      '1':  {mult:1,  span:'minute'},
-      '5':  {mult:5,  span:'minute'},
-      '15': {mult:15, span:'minute'},
-      '60': {mult:1,  span:'hour'},
-      'D':  {mult:1,  span:'day'},
-      'W':  {mult:1,  span:'week'},
+      '1':'1m','5':'5m','15':'15m','60':'1h','D':'1d','W':'1w'
     };
-    const {mult, span} = resMap[res] || {mult:1, span:'day'};
-
+    const ttRes = resMap[res] || '1d';
     const now = new Date();
     const rangeMs = {'1d':86400000,'5d':432000000,'1m':2592000000,'3m':7776000000,'1y':31536000000,'5y':157680000000};
     const ms = rangeMs[range] || 31536000000;
-    const from = new Date(now - ms).toISOString().split('T')[0];
-    const to = now.toISOString().split('T')[0];
-
-    const url = `${POLY_BASE}/v2/aggs/ticker/${sym}/range/${mult}/${span}/${from}/${to}?adjusted=true&sort=asc&limit=500&apiKey=${POLY_KEY}`;
-    console.log(`Fetching candles: ${sym} ${mult}${span}`, url);
-    const r = await fetch(url);
-    const d = await r.json();
-    console.log(`Candle response ${sym}:`, d?.status, 'count:', d?.resultsCount);
-    if(!d?.results||d.results.length===0) return null;
-    return d.results.map(c=>({
-      t: new Date(c.t),
-      o: c.o, h: c.h, l: c.l, c: c.c, v: c.v
-    }));
+    const from = new Date(now - ms).toISOString();
+    const to   = now.toISOString();
+    const path = \`/market-data/history?symbol=\${sym}&interval=\${ttRes}&start=\${encodeURIComponent(from)}&end=\${encodeURIComponent(to)}\`;
+    console.log(\`Fetching candles: \${sym} \${ttRes}\`);
+    const d = await ttGet(path);
+    const items = d?.data?.candles || d?.data?.items || d?.data || [];
+    if(!items||items.length===0){ console.log(\`No candles for \${sym}\`); return null; }
+    return items.map(c=>({
+      t: new Date(c.time || c.datetime || c.t),
+      o: parseFloat(c.open||c.o),
+      h: parseFloat(c.high||c.h),
+      l: parseFloat(c.low||c.l),
+      c: parseFloat(c.close||c.c),
+      v: parseInt(c.volume||c.v||0)
+    })).filter(c=>c.c&&!isNaN(c.c));
   } catch(e){ console.error('Candle error',sym,e); return null; }
 }
 
@@ -501,7 +541,8 @@ function renderSignals() {
   }).join('');
 }
 
-// ── SELECT TICKER ───────────────────────────────────────────────────────────
+const candleCache = {};
+
 async function selectTicker(sym) {
   activeTicker=sym;
   renderTickerList();
@@ -515,17 +556,25 @@ async function selectTicker(sym) {
     document.getElementById('active-change').className=`chart-change-display ${chgNum>=0?'up':'down'}`;
     document.getElementById('stat-high').textContent=q.high?`$${q.high}`:'--';
     document.getElementById('stat-low').textContent=q.low?`$${q.low}`:'--';
-    document.getElementById('stat-vol').textContent='--';
+    document.getElementById('stat-vol').textContent=q.volume?formatVol(q.volume):'--';
     document.getElementById('stat-avgvol').textContent='--';
   }
-  let candles=await fetchCandles(sym,activeTF,activeFrom);
-  if(!candles||candles.length===0) candles=await fetchCandles(sym,'D','1y');
-  if(!candles||candles.length===0) candles=await fetchCandles(sym,'W','5y');
+
+  // Use cache if available — avoids repeat API calls
+  let candles = candleCache[sym];
+  if(!candles) {
+    candles = await fetchCandles(sym,'D','1y');
+    if(!candles||candles.length===0) candles = await fetchCandles(sym,'W','5y');
+    if(candles&&candles.length>0) candleCache[sym] = candles;
+  }
+
   if(candles&&candles.length>0){
     renderChart(candles);
     const inds=updateIndicators(candles,q?.price);
     const newSigs=generateSignals(sym,candles.map(c=>c.c),candles,inds.rsi,inds.macd,inds.vwap,q?.price);
-    signals.push(...newSigs);
+    // Only add signals if not already present for this ticker
+    const existing=signals.map(s=>s.ticker);
+    if(!existing.includes(sym)) signals.push(...newSigs);
     renderSignals();
     if(candles[candles.length-1].v){
       document.getElementById('stat-vol').textContent=formatVol(candles[candles.length-1].v);
@@ -536,7 +585,7 @@ async function selectTicker(sym) {
     ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
     ctx.fillStyle='#444';
     ctx.font='11px monospace';
-    ctx.fillText('No chart data available — try 1D or wait for market open',40,180);
+    ctx.fillText('Rate limit hit — wait 60 seconds and click again',40,180);
   }
 }
 
@@ -560,52 +609,14 @@ async function refreshAll() {
   btn.textContent='↺ LOADING';btn.classList.add('loading');
   signals=[];
 
-  // Batch fetch all quotes in one call using Polygon snapshot
-  try {
-    const syms = ALL_TICKERS.map(t=>t.sym).join(',');
-    const r = await fetch(`${POLY_BASE}/v2/snapshot/locale/us/markets/stocks/tickers?tickers=${syms}&apiKey=${POLY_KEY}`);
-    const d = await r.json();
-    if(d?.tickers) {
-      for(const t of d.tickers) {
-        const price = t.day?.c || t.prevDay?.c;
-        const prev = t.prevDay?.c;
-        if(!price||!prev) continue;
-        const change = price-prev;
-        const changePct = (change/prev)*100;
-        quoteData[t.ticker] = {
-          sym: t.ticker,
-          price: price.toFixed(2),
-          change: change.toFixed(2),
-          changePct: changePct.toFixed(2),
-          high: t.day?.h?.toFixed(2),
-          low: t.day?.l?.toFixed(2),
-          volume: t.day?.v,
-          prevClose: prev.toFixed(2),
-          _signal: 'neutral'
-        };
-      }
-    }
-  } catch(e){ console.error('Snapshot error', e); }
-
-  // Compute signals using daily candles — one at a time with delay to avoid 429
-  for(const t of ALL_TICKERS){
-    const q=quoteData[t.sym];
-    if(!q) continue;
-    await new Promise(r=>setTimeout(r,500)); // 500ms between calls = 2/sec, safe for free tier
-    const candles=await fetchCandles(t.sym,'D','1y');
-    if(candles&&candles.length>0){
-      const closes=candles.map(c=>c.c).filter(Boolean);
-      const rsi=calcRSI(closes);
-      const macd=calcMACD(closes);
-      const vwap=calcVWAP(candles);
-      const newSigs=generateSignals(t.sym,closes,candles,rsi,macd,vwap,q.price);
-      signals.push(...newSigs);
-      const bulls=newSigs.filter(s=>s.dir==='bull').length;
-      const bears=newSigs.filter(s=>s.dir==='bear').length;
-      quoteData[t.sym]._signal=bulls>bears?'bull':bears>bulls?'bear':'neutral';
-    }
+  // Fetch all quotes from Tastytrade one at a time
+  for(const t of ALL_TICKERS) {
+    const q = await fetchQuote(t.sym);
+    if(q) quoteData[t.sym] = {...q, _signal:'neutral'};
+    await new Promise(r=>setTimeout(r,150));
   }
 
+  // Only fetch quotes in bulk — candles load on demand when ticker is clicked
   renderTickerList();
   renderSignals();
   await selectTicker(activeTicker);
