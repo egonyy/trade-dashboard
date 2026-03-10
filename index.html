@@ -114,11 +114,11 @@
         <div class="chart-change-display" id="active-change">---</div>
       </div>
       <div class="tf-buttons">
-        <button class="tf-btn active" onclick="setTF('1','1d',this)">1M</button>
+        <button class="tf-btn" onclick="setTF('1','1d',this)">1M</button>
         <button class="tf-btn" onclick="setTF('5','1d',this)">5M</button>
         <button class="tf-btn" onclick="setTF('15','1d',this)">15M</button>
         <button class="tf-btn" onclick="setTF('60','1m',this)">1H</button>
-        <button class="tf-btn" onclick="setTF('D','1y',this)">1D</button>
+        <button class="tf-btn active" onclick="setTF('D','1y',this)">1D</button>
       </div>
     </div>
     <div class="chart-container">
@@ -188,8 +188,8 @@ const ALL_TICKERS = [...TICKERS.indexes, ...TICKERS.active_options];
 let quoteData = {};
 let chartInstance = null;
 let activeTicker = 'SPY';
-let activeTF = '1';
-let activeFrom = '1d';
+let activeTF = 'D';
+let activeFrom = '1y';
 let signals = [];
 
 // ── CLOCK ──────────────────────────────────────────────────────────────────
@@ -502,7 +502,9 @@ async function selectTicker(sym) {
     document.getElementById('stat-vol').textContent='--';
     document.getElementById('stat-avgvol').textContent='--';
   }
-  const candles=await fetchCandles(sym,activeTF,activeFrom);
+  let candles=await fetchCandles(sym,activeTF,activeFrom);
+  if(!candles||candles.length===0) candles=await fetchCandles(sym,'D','1y');
+  if(!candles||candles.length===0) candles=await fetchCandles(sym,'W','5y');
   if(candles&&candles.length>0){
     renderChart(candles);
     const inds=updateIndicators(candles,q?.price);
@@ -512,6 +514,13 @@ async function selectTicker(sym) {
     if(candles[candles.length-1].v){
       document.getElementById('stat-vol').textContent=formatVol(candles[candles.length-1].v);
     }
+  } else {
+    const ctx=document.getElementById('mainChart').getContext('2d');
+    if(chartInstance) chartInstance.destroy();
+    ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
+    ctx.fillStyle='#444';
+    ctx.font='11px monospace';
+    ctx.fillText('No chart data available — try 1D or wait for market open',40,180);
   }
 }
 
