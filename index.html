@@ -587,11 +587,12 @@ async function refreshAll() {
     }
   } catch(e){ console.error('Snapshot error', e); }
 
-  // Compute signals using 5-min candles for each ticker
+  // Compute signals using daily candles — one at a time with delay to avoid 429
   for(const t of ALL_TICKERS){
     const q=quoteData[t.sym];
     if(!q) continue;
-    const candles=await fetchCandles(t.sym,'5','5d');
+    await new Promise(r=>setTimeout(r,500)); // 500ms between calls = 2/sec, safe for free tier
+    const candles=await fetchCandles(t.sym,'D','1y');
     if(candles&&candles.length>0){
       const closes=candles.map(c=>c.c).filter(Boolean);
       const rsi=calcRSI(closes);
@@ -612,9 +613,17 @@ async function refreshAll() {
 }
 
 // ── INIT ─────────────────────────────────────────────────────────────────────
+let isRefreshing = false;
+const _refreshAll = refreshAll;
+refreshAll = async function() {
+  if(isRefreshing) return;
+  isRefreshing = true;
+  await _refreshAll();
+  isRefreshing = false;
+}
 renderTickerList();
 refreshAll();
-setInterval(refreshAll,90000);
+setInterval(refreshAll, 300000); // auto-refresh every 5 min only
 </script>
 </body>
 </html>
