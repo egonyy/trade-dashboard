@@ -162,11 +162,11 @@
 <script>
 // ── TASTYTRADE CONFIG ────────────────────────────────────────────────────────
 const TT = {
-  base:        'https://api.cert.tastyworks.com',
-  clientId:    '804b8f22-ecf3-4638-908f-f26536d5174e',
-  clientSecret:'d116c536fa31e3a2f27606457b8005940eb6ed42',
-  refreshToken:'eyJhbGciOiJFZERTQSIsInR5cCI6InJ0K2p3dCIsImtpZCI6Imlra1NGclFCRFNlZFBOX3lVTU4wZURlWUNGNEhNWTZsYTBtb3RBenVZUzAiLCJqa3UiOiJodHRwOi8vaW5ncmVzcy1uZ2lueC1leHRlcm5hbC1jb250cm9sbGVyLWV4dGVybmFsLmluZ3Jlc3Mtbmdpbnguc3ZjL29hdXRoL2p3a3MifQ.eyJpc3MiOiJodHRwczovL2FwaS5jZXJ0LnRhc3R5d29ya3MuY29tIiwic3ViIjoiVWQzM2ZiYWVmLTA1MTQtNDIxMC1hNTRjLWFhZTA5ZjUxZjliYyIsImlhdCI6MTc3MzE2NzMzOSwiYXVkIjoiODA0YjhmMjItZWNmMy00NjM4LTkwOGYtZjI2NTM2ZDUxNzRlIiwiZ3JhbnRfaWQiOiJHY2IwZGU3YTUtYWZlZi00NjI3LTk4ZWItMjBmNGUzNDk5MmZlIiwia2lkIjoiaWtrU0ZyUUJEU2VkUE5feVVNTjBlRGVZQ0Y0SE1ZNmxhMG1vdEF6dVlTMCIsInNjb3BlIjoicmVhZCB0cmFkZSBvcGVuaWQifQ.pXk0dqKPOpQn_scRBCAqwN4ZjlTUEBD5XvfxGR4TaEoiaEPpsYa-At8YSBuuAvd26WT8on_3odywWrmvxJyPDw',
-  account:     '5WY34946',
+  base:        'https://api.tastyworks.com',
+  clientId:    '9896a99c-2e6b-470a-b590-79fa7550dbab',
+  clientSecret:'9d6e4e9758f8ad07d7932e1f9c14ec4082b35ffc',
+  refreshToken:'eyJhbGciOiJFZERTQSIsInR5cCI6InJ0K2p3dCIsImtpZCI6IjRKeXhoR2ZrdVFkeWVENEpsTnpsZ2FFakMxZ20yX1hqNjBiUXBYOTdCa2siLCJqa3UiOiJodHRwczovL2ludGVyaW9yLWFwaS5hcjIudGFzdHl0cmFkZS5zeXN0ZW1zL29hdXRoL2p3a3MifQ.eyJpc3MiOiJodHRwczovL2FwaS50YXN0eXRyYWRlLmNvbSIsInN1YiI6IlUwOTE2NTk5Zi00ZTQ4LTQ5OWEtYWMzMi05Mjg2MjYyMTZiZGIiLCJpYXQiOjE3NzMxNjkwMDAsImF1ZCI6Ijk4OTZhOTljLTJlNmItNDcwYS1iNTkwLTc5ZmE3NTUwZGJhYiIsImdyYW50X2lkIjoiR2FlMjE3NzVlLWIyMjItNGE2Zi1iOTg3LWUzMDY1OTkxOGY0ZiIsInNjb3BlIjoicmVhZCB0cmFkZSBvcGVuaWQifQ.UlZrlA_b86QV7t1m9xiuMI4Emq_qBm72Vy4locPgjgWSNlN2kvNsQKCWCdnMaL9fNw_QbiBC9k4VRSLaffpoBA',
+  account:     '5WI47872',
   accessToken: null,
   tokenExpiry:  0,
 };
@@ -256,11 +256,12 @@ updateClock();
 // ── TASTYTRADE MARKET DATA ───────────────────────────────────────────────────
 async function fetchQuote(sym) {
   try {
-    const d = await ttGet(`/market-data/quotes/${sym}`);
-    const q = d?.data?.quotes?.[0] || d?.data;
-    if(!q) return null;
-    const price = parseFloat(q['last-price'] || q['close'] || q['bid'] || 0);
-    const prev  = parseFloat(q['prev-close'] || q['previous-close'] || price);
+    const d = await ttGet(`/market-data/equity-quotes?symbol[]=${sym}`);
+    const items = d?.data?.items;
+    const q = items?.[0];
+    if(!q) { console.warn('No quote data for', sym, d); return null; }
+    const price = parseFloat(q['mark'] || q['last'] || q['ask'] || 0);
+    const prev  = parseFloat(q['prev-close'] || q['close'] || price);
     if(!price) return null;
     const change = price - prev;
     const changePct = prev ? (change/prev)*100 : 0;
@@ -291,13 +292,15 @@ async function fetchCandles(sym, res, range) {
     const ms = rangeMs[range] || 31536000000;
     const from = new Date(now - ms).toISOString();
     const to   = now.toISOString();
-    const path = `/market-data/history?symbol=${sym}&interval=${ttRes}&start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}`;
+    const path = `/market-data/equity-histories?symbol[]=${sym}&interval=${ttRes}&start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}`;
     console.log(`Fetching candles: ${sym} ${ttRes}`);
     const d = await ttGet(path);
-    const items = d?.data?.candles || d?.data?.items || d?.data || [];
-    if(!items||items.length===0){ console.log(`No candles for ${sym}`); return null; }
+    // TT history returns data.items[0].candles
+    const symData = d?.data?.items?.[0] || d?.data?.[0];
+    const items = symData?.candles || d?.data?.items || d?.data || [];
+    if(!items||items.length===0){ console.log(`No candles for ${sym}`, d); return null; }
     return items.map(c=>({
-      t: new Date(c.time || c.datetime || c.t),
+      t: new Date(c.time || c['open-time'] || c.datetime || c.t),
       o: parseFloat(c.open||c.o),
       h: parseFloat(c.high||c.h),
       l: parseFloat(c.low||c.l),
