@@ -160,8 +160,8 @@
 </div>
 
 <script>
-const API = 'd6ntr1pr01qse5qn3740d6ntr1pr01qse5qn374g';
-const BASE = 'https://finnhub.io/api/v1';
+const POLY_KEY = 'XF7VIsABuROvCbskET6rqEiPv6TKZXHy';
+const POLY_BASE = 'https://api.polygon.io';
 
 const TICKERS = {
   indexes: [
@@ -208,13 +208,16 @@ function updateClock() {
 setInterval(updateClock,1000);
 updateClock();
 
-// ── FINNHUB FETCH ──────────────────────────────────────────────────────────
+// ── POLYGON/MASSIVE FETCH ──────────────────────────────────────────────────
 async function fetchQuote(sym) {
   try {
-    const r = await fetch(`${BASE}/quote?symbol=${sym}&token=${API}`);
+    const r = await fetch(`${POLY_BASE}/v2/snapshot/locale/us/markets/stocks/tickers/${sym}?apiKey=${POLY_KEY}`);
     const d = await r.json();
-    if(!d||d.c===0) return null;
-    const price = d.c, prev = d.pc;
+    const t = d?.ticker;
+    if(!t) return null;
+    const price = t.day?.c || t.prevDay?.c;
+    const prev = t.prevDay?.c;
+    if(!price||!prev) return null;
     const change = price - prev;
     const changePct = (change/prev)*100;
     return {
@@ -222,36 +225,46 @@ async function fetchQuote(sym) {
       price: price.toFixed(2),
       change: change.toFixed(2),
       changePct: changePct.toFixed(2),
-      high: d.h?.toFixed(2),
-      low: d.l?.toFixed(2),
-      open: d.o?.toFixed(2),
-      prevClose: prev?.toFixed(2),
-      volume: null,
+      high: t.day?.h?.toFixed(2),
+      low: t.day?.l?.toFixed(2),
+      open: t.day?.o?.toFixed(2),
+      prevClose: prev.toFixed(2),
+      volume: t.day?.v,
       avgVolume: null
     };
-  } catch(e){ return null; }
+  } catch(e){ console.error('Quote error',sym,e); return null; }
 }
 
 async function fetchCandles(sym, res, range) {
   try {
-    const now = Math.floor(Date.now()/1000);
-    const rangeSeconds = {'1d':86400,'5d':432000,'1m':2592000,'3m':7776000,'1y':31536000,'5y':157680000};
-    const seconds = rangeSeconds[range] || 31536000;
-    const from = now - seconds;
-    const url = `${BASE}/stock/candle?symbol=${sym}&resolution=${res}&from=${from}&to=${now}&token=${API}`;
-    console.log(`Fetching candles: ${sym} res=${res}`, url);
+    // Map our resolution codes to Polygon multiplier/timespan
+    const resMap = {
+      '1':  {mult:1,  span:'minute'},
+      '5':  {mult:5,  span:'minute'},
+      '15': {mult:15, span:'minute'},
+      '60': {mult:1,  span:'hour'},
+      'D':  {mult:1,  span:'day'},
+      'W':  {mult:1,  span:'week'},
+    };
+    const {mult, span} = resMap[res] || {mult:1, span:'day'};
+
+    const now = new Date();
+    const rangeMs = {'1d':86400000,'5d':432000000,'1m':2592000000,'3m':7776000000,'1y':31536000000,'5y':157680000000};
+    const ms = rangeMs[range] || 31536000000;
+    const from = new Date(now - ms).toISOString().split('T')[0];
+    const to = now.toISOString().split('T')[0];
+
+    const url = `${POLY_BASE}/v2/aggs/ticker/${sym}/range/${mult}/${span}/${from}/${to}?adjusted=true&sort=asc&limit=500&apiKey=${POLY_KEY}`;
+    console.log(`Fetching candles: ${sym} ${mult}${span}`, url);
     const r = await fetch(url);
     const d = await r.json();
-    console.log(`Candle response for ${sym}:`, d?.s, 'points:', d?.t?.length);
-    if(!d||d.s==='no_data'||!d.t||d.t.length===0) return null;
-    return d.t.map((t,i)=>({
-      t: new Date(t*1000),
-      o: d.o[i], h: d.h[i], l: d.l[i], c: d.c[i], v: d.v[i]
-    })).filter(c=>c.c!=null);
-  } catch(e){
-    console.error(`Candle fetch error for ${sym}:`, e);
-    return null;
-  }
+    console.log(`Candle response ${sym}:`, d?.status, 'count:', d?.resultsCount);
+    if(!d?.results||d.results.length===0) return null;
+    return d.results.map(c=>({
+      t: new Date(c.t),
+      o: c.o, h: c.h, l: c.l, c: c.c, v: c.v
+    }));
+  } catch(e){ console.error('Candle error',sym,e); return null; }
 }
 
 // ── INDICATORS ─────────────────────────────────────────────────────────────
@@ -547,14 +560,34 @@ async function refreshAll() {
   btn.textContent='↺ LOADING';btn.classList.add('loading');
   signals=[];
 
-  // Fetch quotes in batches to respect rate limits
-  for(const t of ALL_TICKERS){
-    const q=await fetchQuote(t.sym);
-    if(q) quoteData[t.sym]=q;
-    await new Promise(r=>setTimeout(r,120)); // slight delay to avoid rate limit
-  }
+  // Batch fetch all quotes in one call using Polygon snapshot
+  try {
+    const syms = ALL_TICKERS.map(t=>t.sym).join(',');
+    const r = await fetch(`${POLY_BASE}/v2/snapshot/locale/us/markets/stocks/tickers?tickers=${syms}&apiKey=${POLY_KEY}`);
+    const d = await r.json();
+    if(d?.tickers) {
+      for(const t of d.tickers) {
+        const price = t.day?.c || t.prevDay?.c;
+        const prev = t.prevDay?.c;
+        if(!price||!prev) continue;
+        const change = price-prev;
+        const changePct = (change/prev)*100;
+        quoteData[t.ticker] = {
+          sym: t.ticker,
+          price: price.toFixed(2),
+          change: change.toFixed(2),
+          changePct: changePct.toFixed(2),
+          high: t.day?.h?.toFixed(2),
+          low: t.day?.l?.toFixed(2),
+          volume: t.day?.v,
+          prevClose: prev.toFixed(2),
+          _signal: 'neutral'
+        };
+      }
+    }
+  } catch(e){ console.error('Snapshot error', e); }
 
-  // Compute signals for each ticker
+  // Compute signals using 5-min candles for each ticker
   for(const t of ALL_TICKERS){
     const q=quoteData[t.sym];
     if(!q) continue;
@@ -570,7 +603,6 @@ async function refreshAll() {
       const bears=newSigs.filter(s=>s.dir==='bear').length;
       quoteData[t.sym]._signal=bulls>bears?'bull':bears>bulls?'bear':'neutral';
     }
-    await new Promise(r=>setTimeout(r,120));
   }
 
   renderTickerList();
