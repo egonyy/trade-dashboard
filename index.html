@@ -393,25 +393,31 @@ async function connectDXLink(syms) {
             if(o === 'NaN' || o === null || !symRaw) continue;
             const match = symRaw.match(/^([A-Z.]+)\{=([^}]+)\}/);
             const sym = match ? match[1] : symRaw;
-            if(!dxCandleData[sym]) dxCandleData[sym] = [];
+            const tf = match ? match[2] : 'd';
+            const key = sym + '|' + tf;
+            if(!dxCandleData[key]) dxCandleData[key] = [];
             const candle = {
               t: new Date(parseInt(t)),
               o:parseFloat(o), h:parseFloat(h),
               l:parseFloat(l), c:parseFloat(cl), v:0
             };
-            if(!isNaN(candle.c) && candle.c > 0) dxCandleData[sym].push(candle);
+            if(!isNaN(candle.c) && candle.c > 0) dxCandleData[key].push(candle);
           }
-          // Render active ticker chart as soon as we have enough candles
-          const activeCandles = dxCandleData[activeTicker];
-          if(activeCandles && activeCandles.length >= 10 && !candleCache[activeTicker]) {
+          // Render active ticker chart — re-render at milestones as more candles arrive
+          const tfMap = {'1':'1m','5':'5m','15':'15m','60':'1h','D':'d','W':'w'};
+          const activeTfKey = activeTicker + '|' + (tfMap[activeTF]||'d');
+          const activeCandles = dxCandleData[activeTfKey];
+          const milestones = [10, 50, 100, 150, 200, 300, 500];
+          if(activeCandles && milestones.includes(activeCandles.length)) {
             const sorted = activeCandles.filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
-            candleCache[activeTicker] = sorted;
-            console.log(`Rendering chart for ${activeTicker} with ${sorted.length} candles`);
+            candleCache[activeTfKey] = sorted;
+            console.log(`Rendering chart for ${activeTicker} tf=${activeTF} with ${sorted.length} candles`);
             renderChart(sorted);
             updateIndicators(sorted, quoteData[activeTicker]?.price);
             const newSigs = generateSignals(activeTicker, sorted.map(c=>c.c), sorted,
               calcRSI(sorted.map(c=>c.c)), calcMACD(sorted.map(c=>c.c)),
               calcVWAP(sorted), quoteData[activeTicker]?.price);
+            signals.length = 0;
             signals.push(...newSigs);
             renderSignals();
           }
@@ -452,28 +458,45 @@ async function fetchQuote(sym) {
   } catch(e) { return null; }
 }
 
+// Map activeTF -> DXLink resolution string and lookback ms
+const TF_CONFIG = {
+  '1':  {dxRes:'1m',  lookback:2*24*60*60*1000},
+  '5':  {dxRes:'5m',  lookback:5*24*60*60*1000},
+  '15': {dxRes:'15m', lookback:10*24*60*60*1000},
+  '60': {dxRes:'1h',  lookback:60*24*60*60*1000},
+  'D':  {dxRes:'d',   lookback:2*365*24*60*60*1000},
+  'W':  {dxRes:'w',   lookback:5*365*24*60*60*1000}
+};
+
 async function fetchCandles(sym, res, range) {
+  const cfg = TF_CONFIG[activeTF] || TF_CONFIG['D'];
+  const key = sym + '|' + cfg.dxRes;
+
   // Return from DXLink cache if available
-  if(dxCandleData[sym]?.length >= 2) {
-    return dxCandleData[sym].filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
+  if(dxCandleData[key]?.length >= 2) {
+    return dxCandleData[key].filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
   }
-  // Subscribe this sym if not already subscribed
+
+  // Subscribe this sym+resolution
   if(dxSocket && dxSocket.readyState === WebSocket.OPEN) {
-    const from = Date.now() - 2*365*24*60*60*1000;
+    const from = Date.now() - cfg.lookback;
+    console.log(`Subscribing ${sym}{=${cfg.dxRes}} from ${new Date(from).toLocaleDateString()}`);
     dxSocket.send(JSON.stringify({
       channel:3, type:'FEED_SUBSCRIPTION',
-      add:[{type:'Candle', symbol:`${sym}{=d}`, fromTime:from}]
+      add:[{type:'Candle', symbol:`${sym}{=${cfg.dxRes}}`, fromTime:from}]
     }));
   }
-  // Wait up to 10s
-  for(let i=0; i<100; i++) {
-    const candles = dxCandleData[sym];
-    if(i % 25 === 0) console.log(`Waiting for candles ${sym}: ${candles?.length||0}`);
+
+  // Wait up to 12s
+  for(let i=0; i<120; i++) {
+    const candles = dxCandleData[key];
+    if(i % 30 === 0) console.log(`Waiting for ${key}: ${candles?.length||0} candles`);
     if(candles && candles.length >= 2) {
       return candles.filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
     }
     await new Promise(r=>setTimeout(r,100));
   }
+  console.log(`Timeout: no candles for ${key}`);
   return null;
 }
 
@@ -506,6 +529,11 @@ function calcMACD(closes) {
 
 function calcVWAP(candles) {
   if(!candles||candles.length===0) return null;
+  // Use last 20 candles typical price average (volume often missing from daily feed)
+  const sample = candles.slice(-20).filter(c=>c.h&&c.l&&c.c&&!isNaN(c.h));
+  if(sample.length===0) return null;
+  const sum = sample.reduce((acc,c)=>acc+(c.h+c.l+c.c)/3, 0);
+  return sum / sample.length;
   const today=new Date();
   const td=candles.filter(c=>{
     const d=new Date(c.t);
@@ -642,8 +670,13 @@ function renderChart(candles) {
       },
       scales:{
         x:{ticks:{color:'#333',font:{family:'Space Mono',size:8},maxTicksLimit:10},grid:{color:'#111'}},
-        y:{position:'right',ticks:{color:'#555',font:{family:'Space Mono',size:9}},grid:{color:'#111'}},
-        y2:{position:'left',ticks:{display:false},grid:{display:false},max:Math.max(...volumes)*5}
+        y:{position:'right',
+           min:Math.min(...closes)*0.995,
+           max:Math.max(...closes)*1.005,
+           ticks:{color:'#555',font:{family:'Space Mono',size:9},callback:v=>v.toFixed(2)},
+           grid:{color:'#111'}},
+        y2:{position:'left',ticks:{display:false},grid:{display:false},
+            max:Math.max(...volumes.filter(v=>v>0))*5||1}
       }
     }
   });
@@ -730,12 +763,13 @@ async function selectTicker(sym) {
     document.getElementById('stat-avgvol').textContent='--';
   }
 
-  // Use cache if available — avoids repeat API calls
-  let candles = candleCache[sym];
+  // Use cache keyed by sym+tf
+  const cfg = TF_CONFIG[activeTF] || TF_CONFIG['D'];
+  const cacheKey = sym + '|' + cfg.dxRes;
+  let candles = candleCache[cacheKey];
   if(!candles) {
-    candles = await fetchCandles(sym,'D','1y');
-    if(!candles||candles.length===0) candles = await fetchCandles(sym,'W','5y');
-    if(candles&&candles.length>0) candleCache[sym] = candles;
+    candles = await fetchCandles(sym, activeTF, '');
+    if(candles&&candles.length>0) candleCache[cacheKey] = candles;
   }
 
   if(candles&&candles.length>0){
