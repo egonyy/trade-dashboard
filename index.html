@@ -294,6 +294,7 @@ async function connectDXLink(syms) {
       const msgs = JSON.parse(e.data);
       const arr = Array.isArray(msgs) ? msgs : [msgs];
       for(const msg of arr) {
+        console.log('DXLink msg:', msg.type, msg.state||msg.channel||'');
         if(msg.type === 'AUTH_STATE' && msg.state === 'AUTHORIZED') {
           console.log('DXLink authorized');
           // Open feed channel
@@ -387,6 +388,7 @@ async function fetchCandles(sym, res, range) {
     console.log(`Fetching candles: ${sym} ${ttRes}`);
     const d = await ttGet(path);
     // TT history returns data.items[0].candles
+    console.log(`Candle raw response for ${sym}:`, JSON.stringify(d).slice(0,300));
     const symData = d?.data?.items?.[0] || d?.data?.[0];
     const items = symData?.candles || d?.data?.items || d?.data || [];
     if(!items||items.length===0){ console.log(`No candles for ${sym}`, d); return null; }
