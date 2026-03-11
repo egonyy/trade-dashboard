@@ -445,34 +445,16 @@ async function fetchQuote(sym) {
 }
 
 async function fetchCandles(sym, res, range) {
-  try {
-    // TT candle resolution mapping
-    const resMap = {
-      '1':'1m','5':'5m','15':'15m','60':'1h','D':'1d','W':'1w'
-    };
-    const ttRes = resMap[res] || '1d';
-    const now = new Date();
-    const rangeMs = {'1d':86400000,'5d':432000000,'1m':2592000000,'3m':7776000000,'1y':31536000000,'5y':157680000000};
-    const ms = rangeMs[range] || 31536000000;
-    const from = new Date(now - ms).toISOString();
-    const to   = now.toISOString();
-    const path = `/market-metrics/history?symbol=${sym}&start-date=${from.split('T')[0]}&end-date=${to.split('T')[0]}&period-frequency=${ttRes === '1d' ? 1 : 7}&period-type=${ttRes === '1d' ? 'day' : 'week'}`;
-    console.log(`Fetching candles: ${sym} ${ttRes}`);
-    const d = await ttGet(path);
-    // TT history returns data.items[0].candles
-    console.log(`Candle raw response for ${sym}:`, JSON.stringify(d).slice(0,300));
-    const symData = d?.data?.items?.[0] || d?.data?.[0];
-    const items = symData?.candles || d?.data?.items || d?.data || [];
-    if(!items||items.length===0){ console.log(`No candles for ${sym}`, d); return null; }
-    return items.map(c=>({
-      t: new Date(c.time || c['open-time'] || c.datetime || c.t),
-      o: parseFloat(c.open||c.o),
-      h: parseFloat(c.high||c.h),
-      l: parseFloat(c.low||c.l),
-      c: parseFloat(c.close||c.c),
-      v: parseInt(c.volume||c.v||0)
-    })).filter(c=>c.c&&!isNaN(c.c));
-  } catch(e){ console.error('Candle error',sym,e); return null; }
+  // Use DXLink candle stream — wait up to 8s for data
+  for(let i=0; i<80; i++) {
+    const candles = dxCandleData[sym];
+    if(candles && candles.length > 5) {
+      return candles.filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
+    }
+    await new Promise(r=>setTimeout(r,100));
+  }
+  console.log(`No DXLink candles for ${sym} after 8s`);
+  return null;
 }
 
 // ── INDICATORS ─────────────────────────────────────────────────────────────
