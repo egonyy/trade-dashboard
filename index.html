@@ -253,31 +253,122 @@ function updateClock() {
 setInterval(updateClock,1000);
 updateClock();
 
-// ── TASTYTRADE MARKET DATA ───────────────────────────────────────────────────
+// ── TASTYTRADE DXLINK MARKET DATA ────────────────────────────────────────────
+// Tastytrade uses DXLink WebSocket for market data, not REST
+// Flow: get token → connect WebSocket → subscribe → receive quotes/candles
+
+let dxSocket = null;
+let dxToken = null;
+let dxChannel = 1;
+const dxCallbacks = {}; // sym -> {quote, candle}
+const dxQuoteData = {}; // live quote store from stream
+const dxCandleData = {}; // live candle store from stream
+
+async function getDXToken() {
+  if(dxToken) return dxToken;
+  const d = await ttGet('/api-quote-tokens');
+  dxToken = d?.data?.token || d?.data?.['dxlink-url'] ? d.data : null;
+  console.log('DX token response:', d?.data);
+  return d?.data;
+}
+
+async function connectDXLink(syms) {
+  const tokenData = await getDXToken();
+  if(!tokenData) { console.error('No DX token'); return; }
+  
+  const wsUrl = tokenData['websocket-url'] || tokenData['dxlink-url'] || 'wss://tasty-openapi-ws.dxfeed.com/realtime';
+  const token = tokenData['token'];
+  
+  console.log('Connecting DXLink:', wsUrl);
+  
+  return new Promise((resolve) => {
+    dxSocket = new WebSocket(wsUrl);
+    
+    dxSocket.onopen = () => {
+      console.log('DXLink connected');
+      // Auth
+      dxSocket.send(JSON.stringify({type:'AUTH',channel:0,token}));
+    };
+    
+    dxSocket.onmessage = (e) => {
+      const msgs = JSON.parse(e.data);
+      const arr = Array.isArray(msgs) ? msgs : [msgs];
+      for(const msg of arr) {
+        if(msg.type === 'AUTH_STATE' && msg.state === 'AUTHORIZED') {
+          console.log('DXLink authorized');
+          // Open feed channel
+          dxSocket.send(JSON.stringify({type:'CHANNEL_REQUEST',channel:dxChannel,service:'FEED',parameters:{contract:'AUTO'}}));
+        }
+        if(msg.type === 'CHANNEL_OPENED') {
+          console.log('DXLink channel open, subscribing...');
+          // Subscribe to quotes for all syms
+          const quoteSubs = syms.map(s => ({type:'Quote',symbol:s}));
+          dxSocket.send(JSON.stringify({type:'FEED_SUBSCRIPTION',channel:dxChannel,reset:true,add:quoteSubs}));
+          resolve();
+        }
+        if(msg.type === 'FEED_DATA') {
+          const events = msg.data;
+          if(!events) continue;
+          for(const ev of events) {
+            if(ev.eventType === 'Quote') {
+              const sym = ev.eventSymbol;
+              const bid = parseFloat(ev.bidPrice||0);
+              const ask = parseFloat(ev.askPrice||0);
+              const price = bid && ask ? (bid+ask)/2 : bid||ask;
+              if(price && sym) {
+                const prev = dxQuoteData[sym]?.prevClose || price;
+                const change = price - prev;
+                const changePct = prev ? (change/prev)*100 : 0;
+                dxQuoteData[sym] = {
+                  sym, 
+                  price: price.toFixed(2),
+                  change: change.toFixed(2),
+                  changePct: changePct.toFixed(2),
+                  high: null, low: null, volume: null,
+                  prevClose: prev.toFixed(2),
+                  _signal: 'neutral',
+                  bid: bid.toFixed(2),
+                  ask: ask.toFixed(2)
+                };
+                // Update UI live
+                if(quoteData[sym]) {
+                  quoteData[sym] = {...quoteData[sym], ...dxQuoteData[sym]};
+                  renderTickerList();
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+    
+    dxSocket.onerror = (e) => console.error('DXLink error:', e);
+    dxSocket.onclose = () => { console.log('DXLink closed'); dxSocket=null; dxToken=null; };
+  });
+}
+
+// Fetch quote via DXLink — returns from cache or waits for stream
 async function fetchQuote(sym) {
+  // Return cached if available
+  if(dxQuoteData[sym]) return dxQuoteData[sym];
+  // Fallback: use market metrics REST endpoint which IS available
   try {
-    const d = await ttGet(`/market-data/equity-quotes?symbol[]=${sym}`);
+    const d = await ttGet(`/market-metrics?symbols=${sym}`);
     const items = d?.data?.items;
     const q = items?.[0];
-    if(!q) { console.warn('No quote data for', sym, d); return null; }
-    const price = parseFloat(q['mark'] || q['last'] || q['ask'] || 0);
-    const prev  = parseFloat(q['prev-close'] || q['close'] || price);
+    if(!q) return null;
+    const price = parseFloat(q['last-price'] || q['mark'] || 0);
     if(!price) return null;
-    const change = price - prev;
-    const changePct = prev ? (change/prev)*100 : 0;
     return {
       sym,
       price: price.toFixed(2),
-      change: change.toFixed(2),
-      changePct: changePct.toFixed(2),
-      high: q['high'] ? parseFloat(q['high']).toFixed(2) : null,
-      low:  q['low']  ? parseFloat(q['low']).toFixed(2)  : null,
-      open: q['open'] ? parseFloat(q['open']).toFixed(2) : null,
-      prevClose: prev.toFixed(2),
-      volume: q['volume'] ? parseInt(q['volume']) : null,
-      avgVolume: null
+      change: '0.00',
+      changePct: '0.00',
+      high: null, low: null, volume: null,
+      prevClose: price.toFixed(2),
+      _signal: 'neutral'
     };
-  } catch(e){ console.error('Quote error', sym, e); return null; }
+  } catch(e) { return null; }
 }
 
 async function fetchCandles(sym, res, range) {
@@ -292,7 +383,7 @@ async function fetchCandles(sym, res, range) {
     const ms = rangeMs[range] || 31536000000;
     const from = new Date(now - ms).toISOString();
     const to   = now.toISOString();
-    const path = `/market-data/equity-histories?symbol[]=${sym}&interval=${ttRes}&start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}`;
+    const path = `/market-metrics/history?symbol=${sym}&start-date=${from.split('T')[0]}&end-date=${to.split('T')[0]}&period-frequency=${ttRes === '1d' ? 1 : 7}&period-type=${ttRes === '1d' ? 'day' : 'week'}`;
     console.log(`Fetching candles: ${sym} ${ttRes}`);
     const d = await ttGet(path);
     // TT history returns data.items[0].candles
@@ -612,11 +703,16 @@ async function refreshAll() {
   btn.textContent='↺ LOADING';btn.classList.add('loading');
   signals=[];
 
-  // Fetch all quotes from Tastytrade one at a time
+  // Connect DXLink for live streaming quotes
+  const syms = ALL_TICKERS.map(t=>t.sym);
+  if(!dxSocket || dxSocket.readyState !== WebSocket.OPEN) {
+    await connectDXLink(syms).catch(e => console.error('DXLink connect failed:', e));
+  }
+  // Also fetch market metrics for initial price display
   for(const t of ALL_TICKERS) {
     const q = await fetchQuote(t.sym);
     if(q) quoteData[t.sym] = {...q, _signal:'neutral'};
-    await new Promise(r=>setTimeout(r,150));
+    await new Promise(r=>setTimeout(r,100));
   }
 
   // Only fetch quotes in bulk — candles load on demand when ticker is clicked
