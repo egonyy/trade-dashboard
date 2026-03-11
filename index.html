@@ -390,22 +390,30 @@ async function connectDXLink(syms) {
         if(dataType === 'Candle') {
           while(data.length >= 7) {
             const [evType, symRaw, t, o, h, l, cl] = data.splice(0,7);
-            if(o === 'NaN' || !symRaw) continue;
+            if(o === 'NaN' || o === null || !symRaw) continue;
             const match = symRaw.match(/^([A-Z.]+)\{=([^}]+)\}/);
             const sym = match ? match[1] : symRaw;
             if(!dxCandleData[sym]) dxCandleData[sym] = [];
-            dxCandleData[sym].push({
+            const candle = {
               t: new Date(parseInt(t)),
               o:parseFloat(o), h:parseFloat(h),
               l:parseFloat(l), c:parseFloat(cl), v:0
-            });
+            };
+            if(!isNaN(candle.c) && candle.c > 0) dxCandleData[sym].push(candle);
           }
-          // If active ticker candles just arrived, render
-          if(dxCandleData[activeTicker]?.length > 5) {
-            const candles = dxCandleData[activeTicker].filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
-            candleCache[activeTicker] = candles;
-            renderChart(candles);
-            updateIndicators(candles, quoteData[activeTicker]?.price);
+          // Render active ticker chart as soon as we have enough candles
+          const activeCandles = dxCandleData[activeTicker];
+          if(activeCandles && activeCandles.length >= 10 && !candleCache[activeTicker]) {
+            const sorted = activeCandles.filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
+            candleCache[activeTicker] = sorted;
+            console.log(`Rendering chart for ${activeTicker} with ${sorted.length} candles`);
+            renderChart(sorted);
+            updateIndicators(sorted, quoteData[activeTicker]?.price);
+            const newSigs = generateSignals(activeTicker, sorted.map(c=>c.c), sorted,
+              calcRSI(sorted.map(c=>c.c)), calcMACD(sorted.map(c=>c.c)),
+              calcVWAP(sorted), quoteData[activeTicker]?.price);
+            signals.push(...newSigs);
+            renderSignals();
           }
         }
       }
@@ -445,18 +453,27 @@ async function fetchQuote(sym) {
 }
 
 async function fetchCandles(sym, res, range) {
-  // Use DXLink candle stream — wait up to 15s for data
-  for(let i=0; i<150; i++) {
+  // Return from DXLink cache if available
+  if(dxCandleData[sym]?.length >= 2) {
+    return dxCandleData[sym].filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
+  }
+  // Subscribe this sym if not already subscribed
+  if(dxSocket && dxSocket.readyState === WebSocket.OPEN) {
+    const from = Date.now() - 2*365*24*60*60*1000;
+    dxSocket.send(JSON.stringify({
+      channel:3, type:'FEED_SUBSCRIPTION',
+      add:[{type:'Candle', symbol:`${sym}{=d}`, fromTime:from}]
+    }));
+  }
+  // Wait up to 10s
+  for(let i=0; i<100; i++) {
     const candles = dxCandleData[sym];
-    if(i % 20 === 0) console.log(`Waiting for candles ${sym}: ${candles?.length||0} so far`);
+    if(i % 25 === 0) console.log(`Waiting for candles ${sym}: ${candles?.length||0}`);
     if(candles && candles.length >= 2) {
-      const sorted = candles.filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
-      console.log(`Got ${sorted.length} candles for ${sym}`);
-      return sorted;
+      return candles.filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
     }
     await new Promise(r=>setTimeout(r,100));
   }
-  console.log(`Timeout waiting for DXLink candles for ${sym}, have: ${dxCandleData[sym]?.length||0}`);
   return null;
 }
 
