@@ -201,7 +201,7 @@ async function ttGet(path) {
   if(!token) return null;
   try {
     const r = await fetch(`${TT.base}${path}`, {
-      headers: {'Authorization': token, 'Content-Type':'application/json'}
+      headers: {'Authorization': 'Bearer ' + token, 'Content-Type':'application/json'}
     });
     if(!r.ok) { console.error(`TT ${path} → ${r.status}`); return null; }
     return await r.json();
