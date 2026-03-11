@@ -349,7 +349,7 @@ async function connectDXLink(syms) {
       if(msg.type === 'FEED_CONFIG' && msg.channel === 3) {
         console.log('DXLink fully ready — subscribing candles');
         // Subscribe daily candles for all syms
-        const from = Date.now() - 365*24*60*60*1000;
+        const from = Date.now() - 2*365*24*60*60*1000; // 2 years back
         const candleSubs = syms.map(s => ({type:'Candle',symbol:`${s}{=d}`,fromTime:from}));
         dxSocket.send(JSON.stringify({channel:3,type:'FEED_SUBSCRIPTION',reset:true,add:candleSubs}));
         resolve();
@@ -445,15 +445,18 @@ async function fetchQuote(sym) {
 }
 
 async function fetchCandles(sym, res, range) {
-  // Use DXLink candle stream — wait up to 8s for data
-  for(let i=0; i<80; i++) {
+  // Use DXLink candle stream — wait up to 15s for data
+  for(let i=0; i<150; i++) {
     const candles = dxCandleData[sym];
-    if(candles && candles.length > 5) {
-      return candles.filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
+    if(i % 20 === 0) console.log(`Waiting for candles ${sym}: ${candles?.length||0} so far`);
+    if(candles && candles.length >= 2) {
+      const sorted = candles.filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
+      console.log(`Got ${sorted.length} candles for ${sym}`);
+      return sorted;
     }
     await new Promise(r=>setTimeout(r,100));
   }
-  console.log(`No DXLink candles for ${sym} after 8s`);
+  console.log(`Timeout waiting for DXLink candles for ${sym}, have: ${dxCandleData[sym]?.length||0}`);
   return null;
 }
 
