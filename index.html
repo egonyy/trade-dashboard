@@ -281,68 +281,140 @@ async function connectDXLink(syms) {
   
   console.log('Connecting DXLink:', wsUrl);
   
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     dxSocket = new WebSocket(wsUrl);
-    
+    let step = 'setup'; // setup -> auth -> channel_q -> feed_setup_q -> channel_c -> feed_setup_c -> ready
+
     dxSocket.onopen = () => {
-      console.log('DXLink connected');
-      // Auth
-      dxSocket.send(JSON.stringify({type:'AUTH',channel:0,token}));
+      console.log('DXLink connected, sending SETUP');
+      dxSocket.send(JSON.stringify({
+        type:'SETUP', channel:0,
+        keepaliveTimeout:60, acceptKeepaliveTimeout:60,
+        version:'0.1-js/1.0.0-beta.3'
+      }));
     };
-    
+
     dxSocket.onmessage = (e) => {
-      const msgs = JSON.parse(e.data);
-      const arr = Array.isArray(msgs) ? msgs : [msgs];
-      for(const msg of arr) {
-        console.log('DXLink msg:', msg.type, msg.state||msg.channel||'');
-        if(msg.type === 'AUTH_STATE' && msg.state === 'AUTHORIZED') {
-          console.log('DXLink authorized');
-          // Open feed channel
-          dxSocket.send(JSON.stringify({type:'CHANNEL_REQUEST',channel:dxChannel,service:'FEED',parameters:{contract:'AUTO'}}));
+      const msg = JSON.parse(e.data);
+      console.log('DXLink msg:', msg.type, msg.state||msg.channel||'');
+
+      if(msg.type === 'SETUP') {
+        // Send AUTH after setup ack
+        dxSocket.send(JSON.stringify({type:'AUTH',channel:0,token}));
+        return;
+      }
+
+      if(msg.type === 'AUTH_STATE') {
+        if(msg.state === 'AUTHORIZED') {
+          console.log('DXLink authorized — opening quote channel');
+          dxSocket.send(JSON.stringify({type:'CHANNEL_REQUEST',channel:1,service:'FEED',parameters:{contract:'AUTO'}}));
+        } else {
+          console.error('DXLink auth failed:', msg);
+          reject(msg);
         }
-        if(msg.type === 'CHANNEL_OPENED') {
-          console.log('DXLink channel open, subscribing...');
-          // Subscribe to quotes for all syms
-          const quoteSubs = syms.map(s => ({type:'Quote',symbol:s}));
-          dxSocket.send(JSON.stringify({type:'FEED_SUBSCRIPTION',channel:dxChannel,reset:true,add:quoteSubs}));
-          resolve();
-        }
-        if(msg.type === 'FEED_DATA') {
-          const events = msg.data;
-          if(!events) continue;
-          for(const ev of events) {
-            if(ev.eventType === 'Quote') {
-              const sym = ev.eventSymbol;
-              const bid = parseFloat(ev.bidPrice||0);
-              const ask = parseFloat(ev.askPrice||0);
-              const price = bid && ask ? (bid+ask)/2 : bid||ask;
-              if(price && sym) {
-                const prev = dxQuoteData[sym]?.prevClose || price;
-                const change = price - prev;
-                const changePct = prev ? (change/prev)*100 : 0;
-                dxQuoteData[sym] = {
-                  sym, 
-                  price: price.toFixed(2),
-                  change: change.toFixed(2),
-                  changePct: changePct.toFixed(2),
-                  high: null, low: null, volume: null,
-                  prevClose: prev.toFixed(2),
-                  _signal: 'neutral',
-                  bid: bid.toFixed(2),
-                  ask: ask.toFixed(2)
-                };
-                // Update UI live
-                if(quoteData[sym]) {
-                  quoteData[sym] = {...quoteData[sym], ...dxQuoteData[sym]};
-                  renderTickerList();
-                }
+        return;
+      }
+
+      if(msg.type === 'CHANNEL_OPENED' && msg.channel === 1) {
+        // Setup quote feed
+        dxSocket.send(JSON.stringify({
+          channel:1, type:'FEED_SETUP',
+          acceptAggregationPeriod:1,
+          acceptDataFormat:'COMPACT',
+          acceptEventFields:{Quote:['eventSymbol','bidPrice','askPrice']}
+        }));
+        return;
+      }
+
+      if(msg.type === 'FEED_CONFIG' && msg.channel === 1) {
+        // Subscribe quotes
+        const quoteSubs = syms.map(s => ({type:'Quote',symbol:s}));
+        dxSocket.send(JSON.stringify({channel:1,type:'FEED_SUBSCRIPTION',reset:true,add:quoteSubs}));
+        // Open candle channel
+        dxSocket.send(JSON.stringify({type:'CHANNEL_REQUEST',channel:3,service:'FEED',parameters:{contract:'AUTO'}}));
+        return;
+      }
+
+      if(msg.type === 'CHANNEL_OPENED' && msg.channel === 3) {
+        // Setup candle feed
+        dxSocket.send(JSON.stringify({
+          channel:3, type:'FEED_SETUP',
+          acceptAggregationPeriod:1,
+          acceptDataFormat:'COMPACT',
+          acceptEventFields:{Candle:['eventType','eventSymbol','time','open','high','low','close']}
+        }));
+        return;
+      }
+
+      if(msg.type === 'FEED_CONFIG' && msg.channel === 3) {
+        console.log('DXLink fully ready — subscribing candles');
+        // Subscribe daily candles for all syms
+        const from = Date.now() - 365*24*60*60*1000;
+        const candleSubs = syms.map(s => ({type:'Candle',symbol:`${s}{=d}`,fromTime:from}));
+        dxSocket.send(JSON.stringify({channel:3,type:'FEED_SUBSCRIPTION',reset:true,add:candleSubs}));
+        resolve();
+        return;
+      }
+
+      if(msg.type === 'FEED_DATA') {
+        const tmp = msg.data;
+        if(!tmp||!Array.isArray(tmp)) return;
+        const dataType = tmp[0];
+        const data = [...(tmp[1]||[])];
+
+        if(dataType === 'Quote') {
+          while(data.length >= 3) {
+            const [sym, bid, ask] = data.splice(0,3);
+            const price = (parseFloat(bid||0)+parseFloat(ask||0))/2;
+            if(price && sym) {
+              const prev = dxQuoteData[sym]?.prevClose || price;
+              const change = price - prev;
+              const changePct = prev ? (change/prev)*100 : 0;
+              dxQuoteData[sym] = {
+                sym, price:price.toFixed(2),
+                change:change.toFixed(2), changePct:changePct.toFixed(2),
+                high:null, low:null, volume:null,
+                prevClose:prev.toFixed(2), _signal:'neutral',
+                bid:parseFloat(bid).toFixed(2), ask:parseFloat(ask).toFixed(2)
+              };
+              quoteData[sym] = {...(quoteData[sym]||{}), ...dxQuoteData[sym]};
+              renderTickerList();
+              // Update active ticker price live
+              if(sym === activeTicker) {
+                document.getElementById('active-price').textContent = `$${price.toFixed(2)}`;
               }
             }
           }
         }
+
+        if(dataType === 'Candle') {
+          while(data.length >= 7) {
+            const [evType, symRaw, t, o, h, l, cl] = data.splice(0,7);
+            if(o === 'NaN' || !symRaw) continue;
+            const match = symRaw.match(/^([A-Z.]+)\{=([^}]+)\}/);
+            const sym = match ? match[1] : symRaw;
+            if(!dxCandleData[sym]) dxCandleData[sym] = [];
+            dxCandleData[sym].push({
+              t: new Date(parseInt(t)),
+              o:parseFloat(o), h:parseFloat(h),
+              l:parseFloat(l), c:parseFloat(cl), v:0
+            });
+          }
+          // If active ticker candles just arrived, render
+          if(dxCandleData[activeTicker]?.length > 5) {
+            const candles = dxCandleData[activeTicker].filter(c=>c.c&&!isNaN(c.c)).sort((a,b)=>a.t-b.t);
+            candleCache[activeTicker] = candles;
+            renderChart(candles);
+            updateIndicators(candles, quoteData[activeTicker]?.price);
+          }
+        }
+      }
+
+      if(msg.type === 'KEEPALIVE') {
+        dxSocket.send(JSON.stringify({type:'KEEPALIVE',channel:0}));
       }
     };
-    
+
     dxSocket.onerror = (e) => console.error('DXLink error:', e);
     dxSocket.onclose = () => { console.log('DXLink closed'); dxSocket=null; dxToken=null; };
   });
