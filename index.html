@@ -367,14 +367,14 @@ async function connectDXLink(syms) {
             const [sym, bid, ask] = data.splice(0,3);
             const price = (parseFloat(bid||0)+parseFloat(ask||0))/2;
             if(price && sym) {
-              const prev = dxQuoteData[sym]?.prevClose || price;
+              const prev = parseFloat(dxQuoteData[sym]?.prevClose) || price;
               const change = price - prev;
               const changePct = prev ? (change/prev)*100 : 0;
               dxQuoteData[sym] = {
                 sym, price:price.toFixed(2),
                 change:change.toFixed(2), changePct:changePct.toFixed(2),
                 high:null, low:null, volume:null,
-                prevClose:prev.toFixed(2), _signal:'neutral',
+                prevClose:parseFloat(prev).toFixed(2), _signal:'neutral',
                 bid:parseFloat(bid).toFixed(2), ask:parseFloat(ask).toFixed(2)
               };
               quoteData[sym] = {...(quoteData[sym]||{}), ...dxQuoteData[sym]};
@@ -536,7 +536,7 @@ function generateSignals(sym,closes,candles,rsi,macd,vwap,price) {
 
   if(vwap&&p){
     const diff=((p-vwap)/vwap)*100;
-    if(Math.abs(diff)<0.08) newSigs.push({ticker:sym,type:'TESTING VWAP',desc:`Price at VWAP $${vwap.toFixed(2)}. Reclaim = bullish, rejection = bearish. Key moment.`,dir:'neutral',strength:2,time:timeStr});
+    if(Math.abs(diff)<0.08) newSigs.push({ticker:sym,type:'TESTING VWAP',desc:`Price at VWAP $${parseFloat(vwap).toFixed(2)}. Reclaim = bullish, rejection = bearish. Key moment.`,dir:'neutral',strength:2,time:timeStr});
   }
 
   if(candles&&candles.length>5){
@@ -616,7 +616,7 @@ function renderChart(candles) {
   }
 
   const vwap=calcVWAP(candles);
-  const vwapLine=vwap?candles.map(()=>parseFloat(vwap.toFixed(2))):[];
+  const vwapLine=vwap&&!isNaN(vwap)?candles.map(()=>parseFloat(parseFloat(vwap).toFixed(2))):[];
 
   if(chartInstance) chartInstance.destroy();
   chartInstance=new Chart(ctx,{
@@ -679,7 +679,7 @@ function updateIndicators(candles,price) {
   if(vwap!==null&&p){
     const above=p>vwap;
     const el=document.getElementById('vwap-val');
-    el.textContent=`$${vwap.toFixed(2)}`;
+    el.textContent=`$${parseFloat(vwap).toFixed(2)}`;
     el.className=`ind-value ${above?'up':'down'}`;
     document.getElementById('vwap-bar').style.cssText=`width:${above?75:25}%;background:${above?'var(--green)':'var(--red)'}`;
     document.getElementById('vwap-signal').textContent=above?'ABOVE VWAP — bullish bias':'BELOW VWAP — bearish bias';
