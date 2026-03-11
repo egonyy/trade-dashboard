@@ -388,8 +388,20 @@ async function connectDXLink(syms) {
         }
 
         if(dataType === 'Candle') {
-          while(data.length >= 7) {
-            const [evType, symRaw, t, o, h, l, cl] = data.splice(0,7);
+          // Compact format: eventType is outer wrapper, per-record fields are 6
+          // [eventSymbol, time, open, high, low, close]
+          if(data.length > 0 && data.length % 6 !== 0) {
+            // Could be 7-field with eventType repeated — detect and handle both
+            console.log(`Candle compact len=${data.length}, first4:`, data.slice(0,4));
+          }
+          const fieldCount = (data.length % 6 === 0) ? 6 : 7;
+          while(data.length >= fieldCount) {
+            let symRaw, t, o, h, l, cl;
+            if(fieldCount === 7) {
+              [, symRaw, t, o, h, l, cl] = data.splice(0,7);
+            } else {
+              [symRaw, t, o, h, l, cl] = data.splice(0,6);
+            }
             if(o === 'NaN' || o === null || !symRaw) continue;
             const match = symRaw.match(/^([A-Z.]+)\{=([^}]+)\}/);
             const sym = match ? match[1] : symRaw;
